@@ -1,9 +1,15 @@
 ###############################################################################
 #  Lançamento de notas/feedback – FIAP Moodle + Streamlit                     #
-#  Versão: 09‑mai‑2025 (HEADLESS por constante)                               #
+#  Versão: 15‑mai‑2025  •  Persistência em Oracle DB (oracledb)               #
 ###############################################################################
+# REQUISITOS:
+#   pip install oracledb streamlit selenium beautifulsoup4 pandas
+###############################################################################
+
 import streamlit as st
-import sqlite3, pandas as pd, time
+import pandas as pd
+import time
+import oracledb
 from selenium import webdriver
 from selenium.webdriver.common.by import By
 from selenium.webdriver.common.keys import Keys
@@ -20,15 +26,50 @@ from bs4 import BeautifulSoup
 # --------------------------------------------------------------------------- #
 # CONFIGURAÇÕES GERAIS                                                        #
 # --------------------------------------------------------------------------- #
+# Moodle
 LOGIN_URL = "https://on.fiap.com.br/"
-USERNAME  = "pf2062"            # ajuste para o seu usuário
-PASSWORD  = "Svp0rt3@T!789"     # ajuste para a sua senha
-DB_FILE   = "atividades.db"
+USERNAME  = "pf2062"            # ajuste p/ seu usuário
+PASSWORD  = "Svp0rt3@T!789"     # ajuste p/ sua senha
 
-HEADLESS  = True                # <<<<<<  Mude para False se quiser ver o Chrome
+# Oracle
+ORA_HOST = "oracle.fiap.com.br"
+ORA_PORT = 1521
+ORA_SID  = "orcl"
+ORA_USER = "p4665"
+ORA_PWD  = "fiap#25"
+
+# Selenium
+HEADLESS = True                 # False p/ ver o Chrome
 # --------------------------------------------------------------------------- #
 
 
+# -------------------------- ORACLE HELPERS --------------------------------- #
+def conectar():
+    dsn = oracledb.makedsn(ORA_HOST, ORA_PORT, sid=ORA_SID)
+    return oracledb.connect(user=ORA_USER, password=ORA_PWD, dsn=dsn)
+
+
+def executar(sql: str, params=(), fetch=False):
+    """
+    Executa SQL no Oracle.  Placeholders devem ser :1, :2, …  (posicionais).
+    """
+    conn = conectar()
+    cur = conn.cursor()
+    cur.execute(sql, params)
+    if fetch:
+        out = cur.fetchall()
+        cur.close(); conn.close()
+        return out
+    conn.commit()
+    cur.close(); conn.close()
+
+
+def inicializar_banco():
+    """As tabelas já devem existir no Oracle; não faz nada aqui."""
+    pass
+
+
+# --------------------------- SELENIUM UTILS -------------------------------- #
 def iniciar_navegador(headless: bool = True):
     opts = Options()
     if headless:
@@ -42,33 +83,16 @@ def somente_texto(html: str) -> str:
     return BeautifulSoup(html or "", "html.parser").get_text("\n").strip()
 
 
-def executar(sql: str, params=(), fetch=False):
-    with sqlite3.connect(DB_FILE) as conn:
-        cur = conn.cursor()
-        cur.execute(sql, params)
-        return cur.fetchall() if fetch else None
-
-
-def inicializar_banco():
-    executar("""CREATE TABLE IF NOT EXISTS atividades(
-                 id INTEGER PRIMARY KEY,
-                 turma TEXT, fase TEXT, id_atividade TEXT,
-                 nome_atividade TEXT, url TEXT)""")
-    executar("""CREATE TABLE IF NOT EXISTS alunos(
-                 id INTEGER PRIMARY KEY,
-                 id_atividade TEXT, id_aluno TEXT, rm TEXT, nome TEXT, grupo TEXT,
-                 nota TEXT, feedback TEXT)""")
-
-
 # -------------------------- MOODLE HELPERS --------------------------------- #
 def logar_moodle(drv):
     drv.get(LOGIN_URL)
     WebDriverWait(drv, 10).until(
-        EC.presence_of_element_located((By.ID, "username")))
-    drv.find_element(By.ID, "username").send_keys(USERNAME)
+        EC.presence_of_element_located((By.ID, "username"))
+    ).send_keys(USERNAME)
     drv.find_element(By.ID, "password").send_keys(PASSWORD + Keys.RETURN)
     WebDriverWait(drv, 10).until(
-        EC.presence_of_element_located((By.CSS_SELECTOR, "body")))
+        EC.presence_of_element_located((By.CSS_SELECTOR, "body"))
+    )
 
 
 def capturar_nome_atividade(drv, url):
@@ -85,6 +109,7 @@ def obter_nota_feedback(drv, id_atividade, id_aluno):
     drv.get(f"https://on.fiap.com.br/mod/assign/view.php?"
             f"id={id_atividade}&rownum=0&action=grader&userid={id_aluno}")
 
+    # Nota
     try:
         WebDriverWait(drv, 8).until(
             EC.presence_of_element_located((By.ID, "id_grade")))
@@ -92,6 +117,7 @@ def obter_nota_feedback(drv, id_atividade, id_aluno):
     except TimeoutException:
         nota = ""
 
+    # Feedback (HTML bruto)
     fb_raw = ""
     try:
         WebDriverWait(drv, 8).until(
@@ -119,11 +145,11 @@ def obter_nota_feedback(drv, id_atividade, id_aluno):
 
 
 def listar_basico(drv, id_atividade):
+    """Lista somente dados dos alunos (sem nota/feedback)."""
     drv.get(f"https://on.fiap.com.br/mod/assign/view.php?id={id_atividade}&action=grading")
     time.sleep(3)
     try:
-        drv.find_element(By.LINK_TEXT, "Todos").click()
-        time.sleep(2)
+        drv.find_element(By.LINK_TEXT, "Todos").click(); time.sleep(2)
     except:
         pass
     soup = BeautifulSoup(drv.page_source, "html.parser")
@@ -144,11 +170,11 @@ def listar_basico(drv, id_atividade):
 
 
 def listar_completo(drv, id_atividade):
+    """Lista alunos + nota + feedback (faz uma consulta por aluno)."""
     drv.get(f"https://on.fiap.com.br/mod/assign/view.php?id={id_atividade}&action=grading")
     time.sleep(3)
     try:
-        drv.find_element(By.LINK_TEXT, "Todos").click()
-        time.sleep(2)
+        drv.find_element(By.LINK_TEXT, "Todos").click(); time.sleep(2)
     except:
         pass
     soup = BeautifulSoup(drv.page_source, "html.parser")
@@ -170,24 +196,22 @@ def listar_completo(drv, id_atividade):
     return alunos
 
 
-# ---------- escrever_feedback e salvar_grade (iguais às versões anteriores) #
 def escrever_feedback(drv, texto):
     if drv.find_elements(By.ID, "id_assignfeedbackcomments_editor_ifr"):
-        ifr = drv.find_element(By.ID, "id_assignfeedbackcomments_editor_ifr")
+        ifr = drv.find_element(By.ID,
+                               "id_assignfeedbackcomments_editor_ifr")
         drv.switch_to.frame(ifr)
         drv.execute_script("document.body.innerHTML = arguments[0];",
                            texto.replace("\n", "<br>"))
         drv.switch_to.default_content()
     else:
-        el = drv.find_element(By.ID, "id_assignfeedbackcomments_editor")
+        el  = drv.find_element(By.ID, "id_assignfeedbackcomments_editor")
         tag = el.tag_name.lower()
         try:
             if tag == "textarea":
-                el.clear()
-                el.send_keys(texto)
+                el.clear(); el.send_keys(texto)
             else:
-                el.send_keys(Keys.CONTROL + "a")
-                el.send_keys(texto)
+                el.send_keys(Keys.CONTROL + "a"); el.send_keys(texto)
         except ElementNotInteractableException:
             if tag == "textarea":
                 drv.execute_script("arguments[0].value = arguments[1];", el, texto)
@@ -205,16 +229,15 @@ def salvar_grade(drv):
         (By.XPATH, "//button[contains(normalize-space(text()),'Salvar mudanças')]")
     ]:
         try:
-            btn = drv.find_element(by, val)
-            break
+            btn = drv.find_element(by, val); break
         except:
             pass
     if btn is None:
         raise RuntimeError("Botão 'Salvar mudanças' não encontrado.")
     drv.execute_script("arguments[0].scrollIntoView(true);", btn)
     btn.click()
-    end = time.time() + 15
-    while time.time() < end:
+    fim = time.time() + 15
+    while time.time() < fim:
         try:
             if drv.find_elements(By.CSS_SELECTOR, ".alert-success"):
                 return
@@ -223,25 +246,26 @@ def salvar_grade(drv):
         except StaleElementReferenceException:
             return
         time.sleep(0.5)
-    print("Aviso: Moodle não respondeu em 15 s.")
+    print("Aviso: Moodle não respondeu em 15 s.")
 
 
-# --------------------------------------------------------------------------- #
-# STREAMLIT INTERFACE                                                         #
-# --------------------------------------------------------------------------- #
+# ------------------------------ STREAMLIT ---------------------------------- #
 def main():
     st.title("Gerenciamento de Atividades e Alunos – FIAP")
 
     menu = st.sidebar.selectbox(
         "Menu",
-        ["Inserir Nova Atividade", "Visualizar Atividades", "Editar Notas e Feedbacks"]
+        ["Inserir Nova Atividade",
+         "Visualizar/Editar Atividades",
+         "Editar Notas e Feedbacks"]
     )
 
     # -------------------- INSERIR ---------------------------------------- #
     if menu == "Inserir Nova Atividade":
-        url   = st.text_input("URL da atividade:")
-        fase  = st.text_input("Fase (ex: Capítulo 1):")
-        turma = st.text_input("Turma (ex: 2A, 3B):")
+        url      = st.text_input("URL da atividade:")
+        fase     = st.text_input("Fase (ex: Capítulo 1):")
+        turma    = st.text_input("Turma (ex: 2A, 3B):")
+        nota_max = st.number_input("Nota máxima (peso)", min_value=0.5, step=0.5)
         col1, col2 = st.columns(2)
         modo = None
         if col1.button("Capturar rápido (só alunos)"):
@@ -249,77 +273,118 @@ def main():
         if col2.button("Capturar completo (alunos + notas + feedback)"):
             modo = "completo"
 
-        if modo and url and fase and turma:
+        if modo and url and fase and turma and nota_max > 0:
             id_atv = urlparse(url).query.split("id=")[1].split("&")[0]
             drv = iniciar_navegador(headless=HEADLESS)
             try:
                 logar_moodle(drv)
                 nome = capturar_nome_atividade(drv, url)
-                alunos = listar_completo(drv, id_atv) if modo == "completo" else listar_basico(drv, id_atv)
+                alunos = (listar_completo(drv, id_atv)
+                          if modo == "completo" else
+                          listar_basico(drv, id_atv))
 
-                executar("""INSERT INTO atividades(turma, fase, id_atividade, nome_atividade, url)
-                            VALUES(?,?,?,?,?)""", (turma, fase, id_atv, nome, url))
+                # grava atividade
+                executar("""INSERT INTO atividades(
+                               turma, fase, id_atividade, nome_atividade, url, nota_max)
+                               VALUES(:1,:2,:3,:4,:5,:6)""",
+                         (turma, fase, id_atv, nome, url, nota_max))
+
+                # grava alunos
                 for a in alunos:
                     executar("""INSERT INTO alunos(
-                        id_atividade, id_aluno, rm, nome, grupo, nota, feedback)
-                        VALUES(?,?,?,?,?,?,?)""",
-                             (id_atv, a["id_aluno"], a["rm"], a["nome"],
-                              a["grupo"], a["nota"], a["feedback"]))
-                st.success(f"Cadastrados {len(alunos)} alunos "
-                           f"({'completos' if modo == 'completo' else 'básicos'}).")
+                                   id_atividade, id_aluno, rm, nome,
+                                   grupo, nota, feedback, ir_alem)
+                                   VALUES(:1,:2,:3,:4,:5,:6,:7,0)""",
+                             (id_atv,
+                              a["id_aluno"], a["rm"], a["nome"],
+                              a["grupo"],    a["nota"], a["feedback"]))
+
+                st.success(f"Cadastrados {len(alunos)} aluno(s) "
+                           f"({'completos' if modo=='completo' else 'básicos'}) "
+                           f"| Nota máx = {nota_max}.")
             finally:
                 drv.quit()
 
-    # -------------------- VISUALIZAR ------------------------------------ #
-    elif menu == "Visualizar Atividades":
-        turmas = executar("SELECT DISTINCT turma FROM atividades", fetch=True)
-        if not turmas:
-            st.info("Nenhuma atividade."); return
-        turma_sel = st.selectbox("Turma", [t[0] for t in turmas])
-        fases = executar("SELECT DISTINCT fase FROM atividades WHERE turma=?",
-                         (turma_sel,), fetch=True)
-        if not fases:
-            st.info("Sem fases."); return
-        fase_sel = st.selectbox("Fase", [f[0] for f in fases])
-        rows = executar("""SELECT nome_atividade, url
-                           FROM atividades
-                           WHERE turma=? AND fase=?""", (turma_sel, fase_sel), fetch=True)
-        for n, u in rows:
-            st.markdown(f"• **{n}** — [abrir]({u})")
+    # -------------------- VISUALIZAR / EDITAR ATIVIDADES ----------------- #
+    elif menu == "Visualizar/Editar Atividades":
+        atividades = executar("""SELECT id, turma, fase, nome_atividade,
+                                        nota_max, url
+                                 FROM   atividades
+                                 ORDER  BY turma, fase, id""", fetch=True)
+        if not atividades:
+            st.info("Nenhuma atividade cadastrada."); return
 
-    # -------------------- EDITAR ---------------------------------------- #
+        df_atv = pd.DataFrame(atividades,
+                              columns=["id", "Turma", "Fase",
+                                       "Atividade", "Nota máxima", "URL"])
+        st.markdown("### Atividades cadastradas (edite localmente)")
+        edit = st.data_editor(
+            df_atv[["id", "Turma", "Fase", "Atividade", "Nota máxima", "URL"]],
+            use_container_width=True,
+            column_config={
+                "id": st.column_config.Column(disabled=True),
+                "URL": st.column_config.LinkColumn(disabled=True)
+            })
+
+        if st.button("Salvar alterações de Turma/Fase/Nota máx"):
+            for _, row in edit.iterrows():
+                executar("""UPDATE atividades
+                               SET turma     = :1,
+                                   fase      = :2,
+                                   nota_max  = :3
+                             WHERE id = :4""",
+                         (row["Turma"],
+                          row["Fase"],
+                          row["Nota máxima"],
+                          int(row["id"])))
+            st.success("Informações atualizadas localmente.")
+
+    # -------------------- EDITAR NOTAS / FEEDBACK ------------------------ #
     else:
         turmas = executar("SELECT DISTINCT turma FROM atividades", fetch=True)
         if not turmas:
             st.info("Nenhuma atividade."); return
         turma_sel = st.selectbox("Turma", [t[0] for t in turmas])
-        fases = executar("SELECT DISTINCT fase FROM atividades WHERE turma=?",
+
+        fases = executar("SELECT DISTINCT fase FROM atividades WHERE turma = :1",
                          (turma_sel,), fetch=True)
         if not fases:
             st.info("Sem fases."); return
         fase_sel = st.selectbox("Fase", [f[0] for f in fases])
-        atvs = executar("""SELECT id_atividade, nome_atividade
-                           FROM atividades
-                           WHERE turma=? AND fase=?""", (turma_sel, fase_sel), fetch=True)
+
+        atvs = executar("""SELECT id_atividade, nome_atividade, nota_max
+                           FROM   atividades
+                           WHERE  turma = :1 AND fase = :2""",
+                        (turma_sel, fase_sel), fetch=True)
         if not atvs:
             st.info("Sem atividades."); return
-        atv_sel = st.selectbox("Atividade", [f"{a[0]} — {a[1]}" for a in atvs])
-        id_atv = atv_sel.split(" — ")[0]
 
-        alunos = executar("""SELECT id, id_aluno, rm, nome, grupo, nota, feedback
-                             FROM alunos
-                             WHERE id_atividade=?""", (id_atv,), True)
+        atv_sel = st.selectbox(
+            "Atividade",
+            [f"{a[0]} — {a[1]} (peso {a[2]})" for a in atvs])
+        id_atv   = atv_sel.split(" — ")[0]
+        nota_max = next(a[2] for a in atvs if a[0] == id_atv)
+
+        st.markdown(f"**Nota máxima:** {nota_max}")
+
+        alunos = executar("""SELECT id, id_aluno, rm, nome, grupo,
+                                    nota, feedback, ir_alem
+                             FROM   alunos
+                             WHERE  id_atividade = :1""",
+                           (id_atv,), fetch=True)
         df = pd.DataFrame(alunos,
-                          columns=["id_reg", "id_aluno", "rm", "nome",
-                                   "grupo", "nota", "feedback"])
+                          columns=["id_reg", "id_aluno", "rm", "nome", "grupo",
+                                   "nota", "feedback", "ir_alem"])
         df["Sel"] = False
         if st.checkbox("Selecionar todos"):
             df["Sel"] = True
-        edit = st.data_editor(
-            df[["Sel", "id_aluno", "rm", "nome", "grupo", "nota", "feedback"]],
-            num_rows="fixed", use_container_width=True)
 
-        # IMPORTAR ------------------------------------------------------- #
+        edit_cols = ["Sel", "id_aluno", "rm", "nome",
+                     "grupo", "nota", "feedback", "ir_alem"]
+        edit = st.data_editor(df[edit_cols],
+                              num_rows="fixed", use_container_width=True)
+
+        # ---------------- IMPORTAR NOTAS / FEEDBACK --------------------- #
         if st.button("Importar do Moodle (somente selecionados)"):
             drv = iniciar_navegador(headless=HEADLESS)
             try:
@@ -328,16 +393,20 @@ def main():
                     if not r["Sel"]:
                         continue
                     id_aluno = str(r["id_aluno"])
-                    id_reg = int(df.loc[df["id_aluno"] == id_aluno, "id_reg"].values[0])
+                    id_reg   = int(df.loc[df["id_aluno"] == id_aluno,
+                                          "id_reg"].values[0])
                     nota, fb = obter_nota_feedback(drv, id_atv, id_aluno)
-                    executar("""UPDATE alunos SET nota=?, feedback=? WHERE id=?""",
+                    executar("""UPDATE alunos
+                                   SET nota     = :1,
+                                       feedback = :2
+                                 WHERE id = :3""",
                              (nota, fb, id_reg))
-                    st.success(f"{r['nome']} importado.")
+                st.success("Importação concluída.")
             finally:
                 drv.quit()
-            st.rerun()
+                st.rerun()
 
-        # SINCRONIZAR ---------------------------------------------------- #
+        # ---------------- SINCRONIZAR COM MOODLE ------------------------ #
         if st.button("Salvar Alterações (somente selecionados)"):
             drv = iniciar_navegador(headless=HEADLESS)
             try:
@@ -346,19 +415,19 @@ def main():
                     if not r["Sel"]:
                         continue
                     id_aluno = str(r["id_aluno"])
-                    id_reg = int(df.loc[df["id_aluno"] == id_aluno, "id_reg"].values[0])
+                    id_reg   = int(df.loc[df["id_aluno"] == id_aluno,
+                                          "id_reg"].values[0])
                     nota_env = str(r["nota"]).strip()
-                    fb_env = somente_texto(r["feedback"])
+                    fb_env   = somente_texto(r["feedback"])
+                    ir_alem_val = int(r.get("ir_alem", 0))
 
                     drv.get(f"https://on.fiap.com.br/mod/assign/view.php?"
                             f"id={id_atv}&rownum=0&action=grader&userid={id_aluno}")
-
                     WebDriverWait(drv, 8).until(
                         EC.presence_of_element_located((By.ID, "id_grade")))
                     campo = drv.find_element(By.ID, "id_grade")
                     try:
-                        campo.clear()
-                        campo.send_keys(nota_env)
+                        campo.clear(); campo.send_keys(nota_env)
                     except ElementNotInteractableException:
                         drv.execute_script("arguments[0].value = arguments[1];",
                                            campo, nota_env)
@@ -366,26 +435,35 @@ def main():
                     escrever_feedback(drv, fb_env)
                     salvar_grade(drv)
 
-                    executar("""UPDATE alunos SET nota=?,feedback=? WHERE id=?""",
-                             (nota_env, fb_env, id_reg))
-                    st.success(f"{r['nome']} sincronizado.")
+                    executar("""UPDATE alunos
+                                   SET nota     = :1,
+                                       feedback = :2,
+                                       ir_alem  = :3
+                                 WHERE id = :4""",
+                             (nota_env, fb_env, ir_alem_val, id_reg))
+                st.success("Sincronização concluída.")
             finally:
                 drv.quit()
-            st.rerun()
+                st.rerun()
 
-        # SALVAR LOCAL --------------------------------------------------- #
+        # ---------------- SALVAR LOCALMENTE ----------------------------- #
         if st.button("Salvar Localmente (somente selecionados)"):
             for _, r in edit.iterrows():
                 if not r["Sel"]:
                     continue
                 id_reg = int(df.loc[df["id_aluno"] == str(r["id_aluno"]),
                                     "id_reg"].values[0])
-                executar("""UPDATE alunos SET nota=?,feedback=? WHERE id=?""",
-                         (r["nota"], r["feedback"], id_reg))
+                executar("""UPDATE alunos
+                               SET nota     = :1,
+                                   feedback = :2,
+                                   ir_alem  = :3
+                             WHERE id = :4""",
+                         (r["nota"], r["feedback"],
+                          int(r.get("ir_alem", 0)), id_reg))
             st.success("Alterações locais gravadas.")
 
 
 # --------------------------------------------------------------------------- #
 if __name__ == "__main__":
-    inicializar_banco()
+    inicializar_banco()   # opcional – não cria nada se já existir
     main()
