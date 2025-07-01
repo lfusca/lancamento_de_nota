@@ -40,7 +40,7 @@ POOL = oracledb.create_pool(
 # CONFIGURAÇÕES DIVERSAS                                                      #
 # --------------------------------------------------------------------------- #
 LOGIN_URL = os.getenv("LOGIN_URL")
-USERNAME  = os.getenv("USERNAME")
+USERNAME  = os.getenv("MOODLE_USER")
 PASSWORD  = os.getenv("PASSWORD")
 HEADLESS  = True                           # True = headless Chrome
 
